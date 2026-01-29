@@ -1,3 +1,6 @@
+"""
+Health check and system status routes
+"""
 from flask import jsonify
 from models import db
 import logging
@@ -6,9 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 def register_health_routes(app):
-    
+    """Register health check and system status routes"""
+
     @app.route('/', methods=['GET'])
     def home():
+        """Root endpoint with API information"""
         return jsonify({
             "status": "Backend is running successfully",
             "version": "1.0.0",
@@ -24,10 +29,15 @@ def register_health_routes(app):
 
     @app.route('/api/health', methods=['GET'])
     def health_check():
-       
+        """
+        Health check endpoint
+        Returns database connection status and system health
+        """
         try:
+            # Test database connection
             db.session.execute('SELECT 1')
             
+            # Count total records
             from models import HighBill
             from sqlalchemy import func
             total_records = db.session.query(func.count(HighBill.id)).scalar()
@@ -49,6 +59,7 @@ def register_health_routes(app):
 
     @app.errorhandler(404)
     def not_found(error):
+        """Handle 404 errors"""
         return jsonify({
             "error": "Endpoint not found",
             "message": str(error),
@@ -57,6 +68,7 @@ def register_health_routes(app):
 
     @app.errorhandler(500)
     def internal_error(error):
+        """Handle 500 errors"""
         db.session.rollback()
         logger.error(f"Internal server error: {str(error)}")
         return jsonify({
