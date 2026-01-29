@@ -1,3 +1,7 @@
+"""
+Statistics and analytics routes
+Handles statistical queries and data analysis
+"""
 from flask import jsonify, request
 from models import db, HighBill
 from sqlalchemy import func
@@ -7,11 +11,18 @@ logger = logging.getLogger(__name__)
 
 
 def register_stats_routes(app):
+    """Register statistics-related routes"""
 
     @app.route('/api/stats', methods=['GET'])
     def get_statistics():
+        """
+        Get comprehensive statistical summary of high bills
         
+        Returns:
+            JSON response with overall statistics and monthly breakdown
+        """
         try:
+            # Get total record count
             total_records = db.session.query(func.count(HighBill.id)).scalar()
             
             if total_records == 0:
@@ -21,6 +32,7 @@ def register_stats_routes(app):
                     "stats": {}
                 }), 200
 
+            # Get overall statistics
             stats = db.session.query(
                 func.sum(HighBill.bill_amount).label('total_amount'),
                 func.avg(HighBill.bill_amount).label('avg_amount'),
@@ -30,6 +42,7 @@ def register_stats_routes(app):
                 func.avg(HighBill.units_consumed).label('avg_units')
             ).first()
 
+            # Get monthly breakdown
             monthly_stats = db.session.query(
                 HighBill.month,
                 func.count(HighBill.id).label('count'),
@@ -38,6 +51,7 @@ def register_stats_routes(app):
                 func.max(HighBill.bill_amount).label('max')
             ).group_by(HighBill.month).all()
 
+            # Build response
             response = {
                 "total_records": total_records,
                 "overall": {
@@ -73,10 +87,19 @@ def register_stats_routes(app):
 
     @app.route('/api/stats/top', methods=['GET'])
     def get_top_bills():
+        """
+        Get top N highest bills
         
+        Query Parameters:
+            limit (int): Number of top bills to return (default: 10)
+            
+        Returns:
+            JSON response with top bills
+        """
         try:
             limit = request.args.get('limit', 10, type=int)
             
+            # Ensure limit is reasonable
             if limit < 1:
                 limit = 10
             elif limit > 100:
@@ -101,8 +124,17 @@ def register_stats_routes(app):
 
     @app.route('/api/stats/monthly/<month>', methods=['GET'])
     def get_monthly_stats(month):
+        """
+        Get statistics for a specific month
         
+        Path Parameters:
+            month (str): Month name (e.g., "January", "February")
+            
+        Returns:
+            JSON response with month-specific statistics
+        """
         try:
+            # Check if month exists
             count = HighBill.query.filter_by(month=month).count()
             
             if count == 0:
@@ -112,6 +144,7 @@ def register_stats_routes(app):
                     "count": 0
                 }), 404
 
+            # Get statistics for the month
             stats = db.session.query(
                 func.count(HighBill.id).label('count'),
                 func.sum(HighBill.bill_amount).label('total'),
@@ -121,6 +154,7 @@ def register_stats_routes(app):
                 func.sum(HighBill.units_consumed).label('total_units')
             ).filter_by(month=month).first()
 
+            # Get top 5 bills for the month
             top_bills = HighBill.query.filter_by(month=month).order_by(
                 HighBill.bill_amount.desc()
             ).limit(5).all()
@@ -149,7 +183,12 @@ def register_stats_routes(app):
 
     @app.route('/api/stats/summary', methods=['GET'])
     def get_quick_summary():
+        """
+        Get a quick summary of the data
         
+        Returns:
+            JSON response with quick summary statistics
+        """
         try:
             total_records = db.session.query(func.count(HighBill.id)).scalar()
             
@@ -159,6 +198,7 @@ def register_stats_routes(app):
                     "message": "No data available"
                 }), 200
 
+            # Quick aggregations
             total_amount = db.session.query(
                 func.sum(HighBill.bill_amount)
             ).scalar()
