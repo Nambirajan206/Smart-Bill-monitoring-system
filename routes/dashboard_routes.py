@@ -1,3 +1,7 @@
+"""
+Dashboard routes
+Handles retrieval and filtering of high-bill records for dashboard display
+"""
 from flask import jsonify, request
 from models import db, HighBill
 import logging
@@ -6,26 +10,37 @@ logger = logging.getLogger(__name__)
 
 
 def register_dashboard_routes(app):
-    
+    """Register dashboard-related routes"""
 
     @app.route('/api/dashboard', methods=['GET'])
     def get_dashboard_data():
+        """
+        Get all high-bill records for dashboard
         
-        try:
+        Query Parameters:
+            limit (int): Number of records to return (default: all)
+            month (str): Filter by specific month
+            sort_by (str): Column to sort by (default: bill_amount)
+            order (str): Sort order - 'asc' or 'desc' (default: desc)
             
+        Returns:
+            JSON response with bill records
+        """
+        try:
+            # Get query parameters
             limit = request.args.get('limit', type=int)
             month = request.args.get('month', type=str)
             sort_by = request.args.get('sort_by', 'bill_amount')
             order = request.args.get('order', 'desc')
 
-           
+            # Build query
             query = HighBill.query
 
-            
+            # Filter by month if provided
             if month:
                 query = query.filter_by(month=month)
 
-           
+            # Sort by specified column
             if sort_by == 'bill_amount':
                 sort_column = HighBill.bill_amount
             elif sort_by == 'units_consumed':
@@ -37,17 +52,17 @@ def register_dashboard_routes(app):
             else:
                 sort_column = HighBill.bill_amount
 
-            
+            # Apply sort order
             if order.lower() == 'asc':
                 query = query.order_by(sort_column.asc())
             else:
                 query = query.order_by(sort_column.desc())
 
-            
+            # Apply limit if provided
             if limit and limit > 0:
                 query = query.limit(limit)
 
-            
+            # Execute query
             bills = query.all()
 
             logger.info(f"Dashboard query returned {len(bills)} records")
@@ -72,7 +87,17 @@ def register_dashboard_routes(app):
 
     @app.route('/api/dashboard/search', methods=['GET'])
     def search_bills():
+        """
+        Search bills by various criteria
         
+        Query Parameters:
+            q (str): Search term (searches across house_id, owner_name, address)
+            min_amount (float): Minimum bill amount
+            max_amount (float): Maximum bill amount
+            
+        Returns:
+            JSON response with matching bill records
+        """
         try:
             search_term = request.args.get('q', '').strip()
             min_amount = request.args.get('min_amount', type=float)
@@ -80,7 +105,7 @@ def register_dashboard_routes(app):
 
             query = HighBill.query
 
-           
+            # Text search across multiple fields
             if search_term:
                 search_filter = db.or_(
                     HighBill.house_id.ilike(f'%{search_term}%'),
@@ -89,7 +114,7 @@ def register_dashboard_routes(app):
                 )
                 query = query.filter(search_filter)
 
-            
+            # Filter by amount range
             if min_amount is not None:
                 query = query.filter(HighBill.bill_amount >= min_amount)
             if max_amount is not None:
@@ -118,7 +143,12 @@ def register_dashboard_routes(app):
 
     @app.route('/api/dashboard/months', methods=['GET'])
     def get_available_months():
+        """
+        Get list of all unique months in the database
         
+        Returns:
+            JSON response with list of months
+        """
         try:
             from sqlalchemy import distinct
 
