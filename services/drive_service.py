@@ -5,7 +5,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
 
-
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,9 @@ SERVICE_ACCOUNT_FILE = 'credentials.json'
 
 
 def get_gdrive_service():
-    
+    """
+    Create and return Google Drive API service instance
+    """
     try:
         creds = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE, scopes=SCOPES
@@ -26,11 +28,23 @@ def get_gdrive_service():
 
 
 def download_excel_files(folder_id):
+    """
+    Download ALL Excel files from a Google Drive folder
     
+    Args:
+        folder_id (str): Google Drive folder ID
+        
+    Returns:
+        list: List of binary file contents (bytes) for each Excel file
+        
+    Raises:
+        Exception: If there's an error accessing Google Drive
+    """
     try:
         service = get_gdrive_service()
         
-       
+        # Query for ALL Excel files in the specific folder
+        # Supports both .xlsx and .xls formats
         query = (
             f"'{folder_id}' in parents and "
             f"(mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or "
@@ -40,11 +54,11 @@ def download_excel_files(folder_id):
         
         logger.info(f"Searching for Excel files in folder: {folder_id}")
         
-       
+        # Get list of all Excel files
         results = service.files().list(
             q=query,
             fields="files(id, name, size, modifiedTime)",
-            pageSize=1000  
+            pageSize=1000  # Increase page size to get more files at once
         ).execute()
         
         files = results.get('files', [])
@@ -57,6 +71,7 @@ def download_excel_files(folder_id):
         
         file_data_list = []
         
+        # Download each Excel file
         for idx, file in enumerate(files, 1):
             try:
                 file_id = file['id']
@@ -65,16 +80,19 @@ def download_excel_files(folder_id):
                 
                 logger.info(f"Downloading file {idx}/{len(files)}: {file_name} (Size: {file_size} bytes)")
                 
+                # Request file content
                 request = service.files().get_media(fileId=file_id)
                 file_stream = io.BytesIO()
                 downloader = MediaIoBaseDownload(file_stream, request)
                 
+                # Download in chunks
                 done = False
                 while not done:
                     status, done = downloader.next_chunk()
                     if status:
                         logger.debug(f"Download progress: {int(status.progress() * 100)}%")
                 
+                # Store the file content
                 file_content = file_stream.getvalue()
                 file_data_list.append({
                     'name': file_name,
@@ -86,9 +104,11 @@ def download_excel_files(folder_id):
                 
             except HttpError as e:
                 logger.error(f"HTTP error downloading {file.get('name', 'unknown')}: {str(e)}")
+                # Continue with other files even if one fails
                 continue
             except Exception as e:
                 logger.error(f"Error downloading {file.get('name', 'unknown')}: {str(e)}")
+                # Continue with other files even if one fails
                 continue
         
         logger.info(f"Successfully downloaded {len(file_data_list)} out of {len(files)} files")
@@ -104,7 +124,16 @@ def download_excel_files(folder_id):
 
 
 def list_files_in_folder(folder_id, mime_type=None):
-   
+    """
+    List all files in a Google Drive folder (utility function)
+    
+    Args:
+        folder_id (str): Google Drive folder ID
+        mime_type (str, optional): Filter by MIME type
+        
+    Returns:
+        list: List of file metadata
+    """
     try:
         service = get_gdrive_service()
         
