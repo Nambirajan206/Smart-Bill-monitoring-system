@@ -5,6 +5,7 @@ db = SQLAlchemy()
 
 
 class HighBill(db.Model):
+    """Model for storing high electricity bills (>5000)"""
     
     __tablename__ = 'high_bills'
     
@@ -18,6 +19,7 @@ class HighBill(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Composite unique constraint to prevent duplicate entries
     __table_args__ = (
         db.UniqueConstraint('house_id', 'month', name='unique_house_month'),
     )
@@ -26,6 +28,7 @@ class HighBill(db.Model):
         return f'<HighBill {self.house_id} - {self.month} - ₹{self.bill_amount}>'
 
     def to_dict(self):
+        """Convert model instance to dictionary"""
         return {
             "id": self.id,
             "House_ID": self.house_id,
