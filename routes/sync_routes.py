@@ -1,3 +1,7 @@
+"""
+Google Drive sync routes
+Handles Excel file synchronization from Google Drive
+"""
 from flask import jsonify, request
 from models import db, HighBill
 from services.drive_service import download_excel_files
@@ -8,11 +12,20 @@ logger = logging.getLogger(__name__)
 
 
 def register_sync_routes(app):
+    """Register sync-related routes"""
 
     @app.route('/api/sync', methods=['POST'])
     def sync_data():
+        """
+        Sync data from Google Drive folder
+        Optional JSON body: {"folder_id": "your-google-drive-folder-id"}
+        If not provided, uses the configured default folder ID from .env
         
+        Returns:
+            JSON response with sync summary
+        """
         try:
+            # Get folder ID from request or app config
             data = request.json if request.json else {}
             folder_id = data.get('folder_id') or app.config.get('GOOGLE_DRIVE_FOLDER_ID')
 
@@ -25,6 +38,7 @@ def register_sync_routes(app):
 
             logger.info(f"Starting sync for folder: {folder_id}")
 
+            # Step 1: Download all Excel files from the folder
             excel_files = download_excel_files(folder_id)
             
             if not excel_files:
@@ -36,16 +50,19 @@ def register_sync_routes(app):
 
             logger.info(f"Found {len(excel_files)} Excel file(s) to process")
 
+            # Step 2: Process all Excel files and filter high bills (>5000)
             all_high_bills = process_excel_files(excel_files)
 
             logger.info(f"Filtered {len(all_high_bills)} high-bill records from all files")
 
+            # Step 3: Store only new records in database
             new_records_count = 0
             duplicate_count = 0
             errors = []
 
             for item in all_high_bills:
                 try:
+                    # Check if record already exists (by house_id and month)
                     exists = HighBill.query.filter_by(
                         house_id=str(item['House_ID']),
                         month=str(item['Month'])
@@ -70,9 +87,11 @@ def register_sync_routes(app):
                     logger.error(error_msg)
                     errors.append(error_msg)
 
+            # Commit all new records
             db.session.commit()
             logger.info(f"Successfully committed {new_records_count} new records")
 
+            # Build response
             response = {
                 "message": "Sync completed successfully",
                 "summary": {
@@ -101,7 +120,12 @@ def register_sync_routes(app):
 
     @app.route('/api/clear', methods=['DELETE'])
     def clear_data():
+        """
+        Permanently clear all data from the database
         
+        Returns:
+            JSON response with number of records removed
+        """
         try:
             num_rows_deleted = db.session.query(HighBill).delete()
             db.session.commit()
