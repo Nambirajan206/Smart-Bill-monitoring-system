@@ -1,6 +1,5 @@
 import os
 import logging
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -14,295 +13,394 @@ try:
         logger.info("Gemini client initialized successfully")
     else:
         client = None
-        logger.warning("GEMINI_API_KEY not found - AI features will use fallback responses")
+        logger.warning("GEMINI_API_KEY not found - AI features will use fallback")
 except ImportError:
     client = None
-    logger.warning("google.genai not installed - AI features will use fallback responses")
+    logger.warning("google.genai not installed - using fallback")
 except Exception as e:
     client = None
-    logger.error(f"Failed to initialize Gemini client: {e}")
+    logger.error(f"Gemini initialization failed: {e}")
 
-def generate_initial_analysis(analysis_data):
-    """Generate initial analysis report using Gemini AI."""
+def analyze_consumer_with_ai(consumer_id, consumer_type, monthly_bills):
+    """Use Gemini AI to analyze a single consumer's monthly pattern and detect spikes"""
     if client is None:
-        return generate_fallback_analysis(analysis_data)
-
+        return analyze_consumer_fallback(consumer_id, consumer_type, monthly_bills)
+    
     try:
-        summary = analysis_data.get('summary', {})
-        anomalies = analysis_data.get('anomalies', [])
-
+        bills_text = "\n".join([f"{b['month']}: ₹{b['amount']:.2f}" for b in monthly_bills])
+        
         prompt = f"""
-You are an electricity usage analyzer for a power distribution company.
+You are an expert electricity bill analyzer. Analyze this consumer's billing pattern to detect sudden spikes.
 
-**Analysis Rules:**
-- Residential bills: Normal range is ₹500 - ₹5000
-- Bills below ₹500 are unusually low
-- Bills above ₹5000 are abnormally high
-- Commercial properties are excluded from anomaly detection
+**Consumer Details:**
+- ID: {consumer_id}
+- Type: {consumer_type}
+- Number of months: {len(monthly_bills)}
 
-**Data Summary:**
-- Total Houses Analyzed: {summary.get('total_records', 0)}
-- Residential Houses: {summary['residential'].get('count', 0)}
-- Commercial Properties: {summary['commercial'].get('count', 0)}
-- Anomalies Detected: {summary.get('anomalies_count', 0)}
+**Monthly Bills:**
+{bills_text}
 
-**Residential Statistics:**
-- Avg: ₹{summary['residential'].get('mean', 0):.2f}
-- Median: ₹{summary['residential'].get('median', 0):.2f}
-- Max: ₹{summary['residential'].get('max', 0):.2f}
-- Min: ₹{summary['residential'].get('min', 0):.2f}
+**Your Task:**
+1. Analyze the month-to-month pattern
+2. Identify ANY months that show sudden, abnormal increases
+3. Compare each month to its previous month(s) and the overall pattern
+4. A spike is when a bill jumps significantly compared to the consumer's normal usage
 
-**Commercial Statistics:**
-- Count: {summary['commercial'].get('count', 0)}
-- Avg: ₹{summary['commercial'].get('mean', 0):.2f}
-- Max: ₹{summary['commercial'].get('max', 0):.2f}
+**Return ONLY a JSON object** (no markdown, no backticks) with this exact structure:
+{{
+  "has_spikes": true or false,
+  "spikes": [
+    {{
+      "month": "month name",
+      "bill_amount": number,
+      "previous_bill": number (average of 1-2 previous months),
+      "increase_percentage": number,
+      "reason": "brief explanation of why this is a spike"
+    }}
+  ],
+  "pattern_summary": "brief description of overall consumption pattern"
+}}
 
-**Top Anomalies (sample):**
-{format_anomalies_for_prompt(anomalies[:20])}
+If no spikes detected, return: {{"has_spikes": false, "spikes": [], "pattern_summary": "description"}}
 
-Provide a comprehensive analysis with:
-1. Overview of usage patterns
-2. Key findings
-3. Severity comparison (high vs low bills)
-4. Reasons for anomalies
-5. Actionable recommendations
+IMPORTANT: Return ONLY the JSON object, nothing else.
 """
 
         response = client.models.generate_content(
             model=MODEL_ID,
             contents=prompt
         )
-
-        return response.text
-
+        
+        import json
+        response_text = response.text.strip()
+        
+        if response_text.startswith('```'):
+            lines = response_text.split('\n')
+            response_text = '\n'.join(lines[1:-1] if lines[-1].strip() == '```' else lines[1:])
+        response_text = response_text.replace('```json', '').replace('```', '').strip()
+        
+        result = json.loads(response_text)
+        
+        if result.get('has_spikes') and result.get('spikes'):
+            for spike in result['spikes']:
+                spike['consumer_id'] = consumer_id
+                spike['consumer_type'] = consumer_type
+        
+        return result
+        
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        return generate_fallback_analysis(analysis_data)
+        logger.error(f"Gemini analysis failed for {consumer_id}: {e}")
+        return analyze_consumer_fallback(consumer_id, consumer_type, monthly_bills)
 
-def answer_question(question, context):
-    """Answer user questions using Gemini AI with full context awareness."""
+def analyze_consumer_fallback(consumer_id, consumer_type, monthly_bills):
+    """Fallback spike detection when Gemini unavailable"""
+    import numpy as np
+    
+    spikes = []
+    
+    for i in range(1, len(monthly_bills)):
+        current = monthly_bills[i]
+        prev = monthly_bills[i-1]
+        
+        increase_pct = ((current['amount'] - prev['amount']) / prev['amount']) * 100
+        
+        if increase_pct > 50:
+            spikes.append({
+                'consumer_id': consumer_id,
+                'consumer_type': consumer_type,
+                'month': current['month'],
+                'bill_amount': current['amount'],
+                'previous_bill': prev['amount'],
+                'increase_percentage': increase_pct,
+                'reason': f'Sudden {increase_pct:.1f}% increase from previous month'
+            })
+    
+    if len(monthly_bills) >= 3:
+        for i in range(2, len(monthly_bills)):
+            current = monthly_bills[i]
+            prev_bills = [monthly_bills[j]['amount'] for j in range(max(0, i-3), i)]
+            avg_prev = np.mean(prev_bills)
+            
+            increase_pct = ((current['amount'] - avg_prev) / avg_prev) * 100
+            
+            if increase_pct > 80:
+                existing = any(s['month'] == current['month'] for s in spikes)
+                if not existing:
+                    spikes.append({
+                        'consumer_id': consumer_id,
+                        'consumer_type': consumer_type,
+                        'month': current['month'],
+                        'bill_amount': current['amount'],
+                        'previous_bill': avg_prev,
+                        'increase_percentage': increase_pct,
+                        'reason': f'{increase_pct:.1f}% above recent average'
+                    })
+    
+    pattern_summary = f"Average bill: ₹{np.mean([b['amount'] for b in monthly_bills]):.2f}"
+    
+    return {
+        'has_spikes': len(spikes) > 0,
+        'spikes': spikes,
+        'pattern_summary': pattern_summary
+    }
+
+def generate_overall_insights(all_results, summary):
+    """Generate overall insights from all consumer analyses"""
     if client is None:
-        return generate_fallback_answer(question, context)
+        return generate_fallback_insights(all_results, summary)
+    
+    try:
+        total_spikes = sum(len(r['spikes']) for r in all_results if r['has_spikes'])
+        consumers_with_spikes = sum(1 for r in all_results if r['has_spikes'])
+        
+        sample_spikes = []
+        for result in all_results:
+            if result['has_spikes']:
+                sample_spikes.extend(result['spikes'][:2])
+        sample_spikes = sample_spikes[:20]
+        
+        spike_text = "\n".join([
+            f"- {s['consumer_id']} ({s['consumer_type']}): {s['month']} - ₹{s['bill_amount']:.2f} "
+            f"(+{s['increase_percentage']:.1f}%) - {s['reason']}"
+            for s in sample_spikes
+        ])
+        
+        prompt = f"""
+Analyze the electricity bill spike detection results across all consumers.
 
+**Summary:**
+- Total Consumers: {summary['total_consumers']}
+- Residential: {summary['residential_count']}
+- Commercial: {summary['commercial_count']}
+- Consumers with Spikes: {consumers_with_spikes}
+- Total Spikes Detected: {total_spikes}
+
+**Sample Detected Spikes:**
+{spike_text if spike_text else "No spikes detected"}
+
+**Provide a comprehensive analysis covering:**
+1. Overview of spike patterns across all consumers
+2. Key insights about spike frequency and magnitude
+3. Comparison between residential and commercial spike patterns
+4. Possible reasons for the detected spikes
+5. Actionable recommendations for the power company
+
+Keep the analysis concise and actionable. Focus on patterns and insights.
+"""
+
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=prompt
+        )
+        
+        return response.text
+        
+    except Exception as e:
+        logger.error(f"Overall insights generation failed: {e}")
+        return generate_fallback_insights(all_results, summary)
+
+def generate_fallback_insights(all_results, summary):
+    """Generate fallback insights when Gemini unavailable"""
+    total_spikes = sum(len(r['spikes']) for r in all_results if r['has_spikes'])
+    consumers_with_spikes = sum(1 for r in all_results if r['has_spikes'])
+    
+    res_spikes = sum(len(r['spikes']) for r in all_results 
+                     if r['has_spikes'] and r['spikes'] and r['spikes'][0].get('consumer_type') == 'Residential')
+    com_spikes = total_spikes - res_spikes
+    
+    if total_spikes == 0:
+        return """**Electricity Bill Spike Analysis**
+
+No sudden spikes detected across all consumers.
+
+All consumers show stable, predictable billing patterns with normal month-to-month variations.
+
+This indicates healthy consumption patterns across the board.
+"""
+    
+    return f"""**Electricity Bill Spike Analysis**
+
+**Overview:**
+Analyzed {summary['total_consumers']} consumers and detected {total_spikes} billing spikes across {consumers_with_spikes} consumers.
+
+**Key Findings:**
+- Residential Spikes: {res_spikes} detected
+- Commercial Spikes: {com_spikes} detected
+- Spike Rate: {(consumers_with_spikes / summary['total_consumers'] * 100):.1f}% of consumers affected
+
+**Pattern Analysis:**
+Each consumer's billing pattern was analyzed individually using AI. Spikes were detected by comparing each month to the consumer's own historical usage pattern, with no fixed thresholds applied.
+
+**Recommendations:**
+1. Investigate all {consumers_with_spikes} consumers with detected spikes
+2. Verify meter accuracy for consumers showing unusual patterns
+3. Check for seasonal factors or one-time events causing spikes
+4. Consider energy audits for consumers with multiple spikes
+5. Monitor these consumers closely in upcoming months
+
+The detection system uses pattern-based analysis tailored to each consumer's unique usage profile.
+"""
+
+def answer_chat_question(question, context):
+    """Answer user questions about the analysis using full context"""
+    if client is None:
+        return answer_chat_fallback(question, context)
+    
     try:
         summary = context.get('summary', {})
-        anomalies = context.get('anomalies', [])
-
+        spikes = context.get('spikes', [])
+        analysis = context.get('analysis', '')
+        raw_data = context.get('raw_data', [])
+        
+        # Format spikes for context
+        spikes_text = ""
+        if spikes:
+            spikes_text = "\n".join([
+                f"- {s['consumer_id']} ({s['consumer_type']}): {s['month']} spike - "
+                f"₹{s['bill_amount']:.2f} (from ₹{s['previous_bill']:.2f}, +{s['increase_percentage']:.1f}%) - {s['reason']}"
+                for s in spikes[:30]
+            ])
+            if len(spikes) > 30:
+                spikes_text += f"\n... and {len(spikes) - 30} more spikes"
+        
+        # Format raw data sample
+        raw_data_text = ""
+        if raw_data:
+            raw_data_text = "\n".join([
+                f"- {d['consumer_id']} ({d['consumer_type']}): {', '.join([f'{m}=₹{a:.0f}' for m, a in list(d['monthly_bills'].items())[:6]])}"
+                for d in raw_data[:10]
+            ])
+            if len(raw_data) > 10:
+                raw_data_text += f"\n... and {len(raw_data) - 10} more consumers"
+        
         prompt = f"""
-You are an electricity usage analyzer assistant. Answer the user's question based ONLY on the provided data.
+You are an AI assistant helping analyze electricity bill data. Answer the user's question based ONLY on the provided data.
 
-**Data Summary:**
-- Total Records: {summary.get('total_records', 0)}
-- Residential: {summary['residential'].get('count', 0)} houses
-- Commercial: {summary['commercial'].get('count', 0)} properties
-- Anomalies: {summary.get('anomalies_count', 0)}
+**Analysis Summary:**
+- Total Consumers: {summary.get('total_consumers', 0)}
+- Residential: {summary.get('residential_count', 0)}
+- Commercial: {summary.get('commercial_count', 0)}
+- Consumers with Spikes: {summary.get('consumers_with_spikes', 0)}
+- Total Spikes: {summary.get('spike_count', 0)}
 
-**Residential Stats:**
-- Avg: ₹{summary['residential'].get('mean', 0):.2f}
-- Median: ₹{summary['residential'].get('median', 0):.2f}
-- Max: ₹{summary['residential'].get('max', 0):.2f}
-- Min: ₹{summary['residential'].get('min', 0):.2f}
-- Std Dev: ₹{summary['residential'].get('std', 0):.2f}
+**Previous Analysis:**
+{analysis}
 
-**Commercial Stats:**
-- Avg: ₹{summary['commercial'].get('mean', 0):.2f}
-- Max: ₹{summary['commercial'].get('max', 0):.2f}
+**Detected Spikes:**
+{spikes_text if spikes_text else "No spikes detected"}
 
-**Thresholds:**
-- Residential Normal Range: ₹{summary['thresholds'].get('residential_min', 500)} - ₹{summary['thresholds'].get('residential_max', 5000)}
-
-**All Anomalies:**
-{format_anomalies_for_prompt(anomalies)}
+**Raw Consumer Data (sample):**
+{raw_data_text if raw_data_text else "No data available"}
 
 **User Question:**
 {question}
 
 **Instructions:**
-- If asked about a specific house (e.g., "House 46", "house id 3"), search the anomaly list and provide ALL details for that house
-- If asked about counts, use the summary statistics
-- If asked about recommendations, provide specific actionable advice
+- Answer ONLY based on the data provided above
+- If asked about a specific consumer, search the data and provide detailed information
+- If asked for recommendations, provide specific, actionable advice
 - If the data doesn't contain the answer, say so clearly
-- Be specific with numbers and house IDs when relevant
+- Be concise but thorough
+- Use numbers and specifics from the data
+
+Provide a clear, helpful answer:
 """
 
         response = client.models.generate_content(
             model=MODEL_ID,
             contents=prompt
         )
-
+        
         return response.text
-
+        
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        return generate_fallback_answer(question, context)
+        logger.error(f"Chat response failed: {e}")
+        return answer_chat_fallback(question, context)
 
-def format_anomalies_for_prompt(anomalies):
-    """Format anomalies list for AI prompt."""
-    if not anomalies:
-        return "No anomalies detected."
-
-    lines = []
-    for i, a in enumerate(anomalies[:100], 1):
-        lines.append(
-            f"{i}. House {a['house_id']} ({a.get('address', 'N/A')}) - "
-            f"Month: {a.get('month', 'N/A')}, Bill: ₹{a['bill_amount']:.2f}, "
-            f"Units: {a.get('units_consumed', 0)}, Severity: {a['severity']}, "
-            f"Reason: {a['reason']}"
-        )
+def answer_chat_fallback(question, context):
+    """Fallback chat responses when Gemini unavailable"""
+    import re
     
-    if len(anomalies) > 100:
-        lines.append(f"... and {len(anomalies) - 100} more anomalies")
-    
-    return "\n".join(lines)
-
-def generate_fallback_analysis(analysis_data):
-    """Generate analysis when Gemini is unavailable."""
-    summary = analysis_data.get('summary', {})
-    anomalies = analysis_data.get('anomalies', [])
-    
-    res = summary.get('residential', {})
-    com = summary.get('commercial', {})
-    
-    high_count = sum(1 for a in anomalies if a['severity'] == 'high')
-    low_count = sum(1 for a in anomalies if a['severity'] == 'low')
-    
-    return f"""Electricity Usage Analysis Report
-
-1. Overview
-Analyzed {summary.get('total_records', 0)} properties ({res.get('count', 0)} residential, {com.get('count', 0)} commercial).
-
-2. Residential Statistics
-- Average Bill: ₹{res.get('mean', 0):.2f}
-- Median Bill: ₹{res.get('median', 0):.2f}
-- Range: ₹{res.get('min', 0):.2f} - ₹{res.get('max', 0):.2f}
-- Normal Range: ₹{summary['thresholds'].get('residential_min', 500)} - ₹{summary['thresholds'].get('residential_max', 5000)}
-
-3. Anomalies Detected
-Total: {summary.get('anomalies_count', 0)} ({(summary.get('anomalies_count', 0) / res.get('count', 1) * 100):.1f}% of residential)
-- High Bills (>₹5000): {high_count}
-- Low Bills (<₹500): {low_count}
-
-4. Key Findings
-{'- Significant anomaly rate requiring investigation' if summary.get('anomalies_count', 0) > res.get('count', 1) * 0.1 else '- Low anomaly rate indicates healthy consumption patterns'}
-- Maximum residential bill of ₹{res.get('max', 0):.2f} is {'nearly ' + str(int(res.get('max', 0) / 5000)) + 'x' if res.get('max', 0) > 10000 else 'above'} the normal threshold
-
-5. Recommendations
-- Investigate houses with multiple anomalies across different months
-- For high bills: Check meter accuracy, offer energy audits
-- For low bills: Inspect for meter tampering, verify occupancy
-- Prioritize properties with extreme values (>₹15,000 or <₹300)
-
-Use the chat to ask specific questions about individual houses or get detailed insights.
-"""
-
-def generate_fallback_answer(question, context):
-    """Generate fallback answer when Gemini is unavailable."""
     q_lower = question.lower()
     summary = context.get('summary', {})
-    anomalies = context.get('anomalies', [])
-    res = summary.get('residential', {})
-    com = summary.get('commercial', {})
+    spikes = context.get('spikes', [])
     
-    import re
-    house_match = re.search(r'\b(?:house\s+(?:id\s+)?)?(\d+)\b', q_lower)
+    consumer_match = re.search(r'\b(c\d+|consumer\s*\d+)\b', q_lower)
     
-    if house_match:
-        house_id = house_match.group(1)
-        house_anomalies = [a for a in anomalies if str(a['house_id']) == house_id]
+    if consumer_match:
+        consumer_id = consumer_match.group(1).upper().replace('CONSUMER ', 'C').replace(' ', '')
+        consumer_spikes = [s for s in spikes if s['consumer_id'].upper().replace(' ', '') == consumer_id]
         
-        if house_anomalies:
-            lines = [f"House {house_id} - {len(house_anomalies)} anomalies found:\n"]
-            for a in house_anomalies:
+        if consumer_spikes:
+            lines = [f"Consumer {consumer_id} has {len(consumer_spikes)} detected spike(s):\n"]
+            for s in consumer_spikes:
                 lines.append(
-                    f"• {a['month']}: ₹{a['bill_amount']:.2f} ({a['units_consumed']} units) - "
-                    f"{a['severity'].upper()} - {a['reason']}"
+                    f"• {s['month']}: ₹{s['bill_amount']:.2f} "
+                    f"(+{s['increase_percentage']:.1f}% from ₹{s['previous_bill']:.2f}) - {s['reason']}"
                 )
-            lines.append(f"\nAddress: {house_anomalies[0].get('address', 'N/A')}")
             return "\n".join(lines)
         else:
-            return f"House {house_id} has no anomalies detected. All bills fall within the normal residential range (₹500 - ₹5000)."
+            return f"Consumer {consumer_id} shows normal billing patterns with no detected spikes."
     
-    if 'how many' in q_lower and 'anomal' in q_lower:
-        return f"I detected {summary.get('anomalies_count', 0)} anomalies out of {res.get('count', 0)} residential houses, which is {(summary.get('anomalies_count', 0) / res.get('count', 1) * 100):.1f}% of the residential properties."
-    
-    elif 'inspect' in q_lower or 'priority' in q_lower or 'first' in q_lower:
-        house_counts = {}
-        for a in anomalies:
-            hid = a['house_id']
-            house_counts[hid] = house_counts.get(hid, 0) + 1
-        
-        top_houses = sorted(house_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-        
-        lines = ["Houses to inspect first (by number of anomalies):\n"]
-        for hid, count in top_houses:
-            house_data = [a for a in anomalies if a['house_id'] == hid]
-            max_bill = max(a['bill_amount'] for a in house_data)
-            lines.append(f"• House {hid}: {count} anomalies, highest bill ₹{max_bill:.2f}")
-        
-        return "\n".join(lines)
-    
-    elif 'residential' in q_lower or 'commercial' in q_lower:
+    if 'how many' in q_lower and 'spike' in q_lower:
         return (
-            f"Residential: {res.get('count', 0)} houses, Avg ₹{res.get('mean', 0):.2f}, "
-            f"Range ₹{res.get('min', 0):.2f} - ₹{res.get('max', 0):.2f}\n"
-            f"Commercial: {com.get('count', 0)} properties, Avg ₹{com.get('mean', 0):.2f}, "
-            f"Max ₹{com.get('max', 0):.2f}"
+            f"Total spikes detected: {summary.get('spike_count', 0)}\n"
+            f"Consumers with spikes: {summary.get('consumers_with_spikes', 0)} out of {summary.get('total_consumers', 0)}\n"
+            f"Spike rate: {(summary.get('consumers_with_spikes', 0) / max(summary.get('total_consumers', 1), 1) * 100):.1f}%"
         )
+    
+    elif 'highest' in q_lower or 'biggest' in q_lower:
+        if spikes:
+            top_spike = max(spikes, key=lambda x: x['increase_percentage'])
+            return (
+                f"Highest spike detected:\n"
+                f"Consumer: {top_spike['consumer_id']} ({top_spike['consumer_type']})\n"
+                f"Month: {top_spike['month']}\n"
+                f"Bill: ₹{top_spike['bill_amount']:.2f}\n"
+                f"Increase: +{top_spike['increase_percentage']:.1f}%\n"
+                f"Reason: {top_spike['reason']}"
+            )
+        else:
+            return "No spikes detected in the analysis."
     
     elif 'recommend' in q_lower or 'what should' in q_lower:
-        high_count = sum(1 for a in anomalies if a['severity'] == 'high')
-        low_count = sum(1 for a in anomalies if a['severity'] == 'low')
+        if summary.get('spike_count', 0) > 0:
+            return (
+                f"Recommendations based on {summary.get('spike_count', 0)} detected spikes:\n\n"
+                f"1. Investigate {summary.get('consumers_with_spikes', 0)} consumers with spikes\n"
+                f"2. Verify meter accuracy for unusual patterns\n"
+                f"3. Check for seasonal factors or events\n"
+                f"4. Offer energy audits to affected consumers\n"
+                f"5. Monitor closely in upcoming billing cycles"
+            )
+        else:
+            return "No spikes detected. Continue regular monitoring of all consumers."
+    
+    elif 'residential' in q_lower or 'commercial' in q_lower:
+        res_spikes = [s for s in spikes if s.get('consumer_type') == 'Residential']
+        com_spikes = [s for s in spikes if s.get('consumer_type') == 'Commercial']
         
         return (
-            f"Recommendations:\n\n"
-            f"1. High Bills ({high_count} cases): Conduct meter accuracy checks and offer energy audits\n"
-            f"2. Low Bills ({low_count} cases): Inspect for meter tampering and verify occupancy\n"
-            f"3. Priority: Focus on houses with multiple anomalies across different months\n"
-            f"4. Extreme Cases: Any residential bill >₹15,000 or <₹300 needs immediate investigation"
-        )
-    
-    elif 'low' in q_lower and ('bill' in q_lower or 'meter' in q_lower):
-        low_anomalies = [a for a in anomalies if a['severity'] == 'low']
-        return (
-            f"{len(low_anomalies)} low-bill anomalies detected (bills <₹500).\n"
-            f"Lowest: ₹{min(a['bill_amount'] for a in low_anomalies):.2f}\n\n"
-            f"These may indicate:\n"
-            f"• Meter malfunction or tampering\n"
-            f"• Vacant properties\n"
-            f"• Electricity theft\n\n"
-            f"Recommend immediate physical meter inspections."
+            f"Residential consumers: {summary.get('residential_count', 0)} total, {len(res_spikes)} spikes detected\n"
+            f"Commercial consumers: {summary.get('commercial_count', 0)} total, {len(com_spikes)} spikes detected"
         )
     
     else:
         return (
-            f"Based on the analysis:\n\n"
-            f"• Total Records: {summary.get('total_records', 0)}\n"
-            f"• Residential: {res.get('count', 0)} (Avg ₹{res.get('mean', 0):.2f})\n"
-            f"• Commercial: {com.get('count', 0)} (Avg ₹{com.get('mean', 0):.2f})\n"
-            f"• Anomalies: {summary.get('anomalies_count', 0)}\n\n"
-            f"Ask me about specific houses (e.g., 'House 46 bill'), recommendations, or statistics!"
+            f"Analysis Summary:\n"
+            f"• Total Consumers: {summary.get('total_consumers', 0)}\n"
+            f"• Spikes Detected: {summary.get('spike_count', 0)}\n"
+            f"• Consumers Affected: {summary.get('consumers_with_spikes', 0)}\n\n"
+            f"Ask me about specific consumers, recommendations, or spike details!"
         )
 
 def validate_gemini_config():
-    """Check if Gemini is properly configured."""
+    """Check if Gemini is properly configured"""
     if client is None:
-        return {
-            "valid": False,
-            "error": "Gemini client not initialized. Check GEMINI_API_KEY environment variable."
-        }
+        return {"valid": False, "error": "Gemini client not initialized"}
     
     try:
-        test = client.models.generate_content(
-            model=MODEL_ID,
-            contents="Test message"
-        )
-        return {
-            "valid": True,
-            "message": "Gemini API working correctly",
-            "model": MODEL_ID
-        }
+        test = client.models.generate_content(model=MODEL_ID, contents="Test")
+        return {"valid": True, "message": "Gemini API working", "model": MODEL_ID}
     except Exception as e:
-        return {
-            "valid": False,
-            "error": str(e)
-        }
+        return {"valid": False, "error": str(e)}
