@@ -1,15 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { analyzeFile, chatWithAI } from '../api';
 
-/* ─────────────────────────────────────────────────────────────────────────
-   STYLES + KEYFRAMES
-   ───────────────────────────────────────────────────────────────────────── */
 const styleTag = document.createElement('style');
 styleTag.textContent = `
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-  .analyzer-row:nth-child(even) { background:#f8fafc; }
-  .analyzer-row:hover { background:#eef2ff !important; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .spike-row:nth-child(even) { background:#f8fafc; }
+  .spike-row:hover { background:#fef3c7 !important; }
   .suggest-btn:hover { background:#eef2ff !important; border-color:#93c5fd !important; }
 `;
 if (!document.querySelector('#analyzer-styles')) {
@@ -17,36 +15,21 @@ if (!document.querySelector('#analyzer-styles')) {
   document.head.appendChild(styleTag);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────
-   HELPER: Extract month name from malformed Pandas string
-   ───────────────────────────────────────────────────────────────────────── */
-const cleanMonthName = (rawMonth) => {
-  if (!rawMonth) return '—';
-  const match = String(rawMonth).match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i);
-  return match ? match[0] : String(rawMonth).trim().split(/[\s\n]/)[0];
-};
-
-/* ─────────────────────────────────────────────────────────────────────────
-   SUGGESTED QUESTIONS
-   ───────────────────────────────────────────────────────────────────────── */
-const SUGGESTIONS = [
-  'How many anomalies were detected?',
-  'Which houses should I inspect first?',
-  'What are the residential vs commercial stats?',
-  'What do you recommend?',
-  'Are there any low-bill meter issues?',
-];
-
-/* ─────────────────────────────────────────────────────────────────────────
-   LOCALSTORAGE HELPERS
-   ───────────────────────────────────────────────────────────────────────── */
 const STORAGE_KEY = 'analyzerState';
+
+const SUGGESTED_QUESTIONS = [
+  'How many spikes were detected?',
+  'Which consumer has the highest spike?',
+  'Show me details for consumer C002',
+  'What do you recommend?',
+  'Compare residential vs commercial spikes'
+];
 
 const saveState = (state) => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch (err) {
-    console.warn('Failed to save analyzer state:', err);
+    console.warn('Failed to save state:', err);
   }
 };
 
@@ -55,7 +38,7 @@ const loadState = () => {
     const saved = localStorage.getItem(STORAGE_KEY);
     return saved ? JSON.parse(saved) : null;
   } catch (err) {
-    console.warn('Failed to load analyzer state:', err);
+    console.warn('Failed to load state:', err);
     return null;
   }
 };
@@ -64,20 +47,15 @@ const clearState = () => {
   try {
     localStorage.removeItem(STORAGE_KEY);
   } catch (err) {
-    console.warn('Failed to clear analyzer state:', err);
+    console.warn('Failed to clear state:', err);
   }
 };
 
-/* ─────────────────────────────────────────────────────────────────────────
-   COMPONENT
-   ───────────────────────────────────────────────────────────────────────── */
 const Analyzer = () => {
-  // Initialize state from localStorage or defaults
   const [state, setState] = useState(() => {
     const saved = loadState();
     return {
       file: null,
-      areaName: saved?.areaName || '',
       fileName: saved?.fileName || null,
       dragging: false,
       analyzing: false,
@@ -86,34 +64,28 @@ const Analyzer = () => {
       messages: saved?.messages || [],
       question: '',
       chatLoading: false,
-      showMonthly: false,
     };
   });
 
-  const fileInputRef  = useRef(null);
+  const fileInputRef = useRef(null);
   const chatBottomRef = useRef(null);
 
-  // Auto-scroll chat
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [state.messages, state.chatLoading]);
 
-  // Persist critical state to localStorage whenever it changes
   useEffect(() => {
     if (state.result) {
       saveState({
-        areaName: state.areaName,
         fileName: state.fileName,
         result: state.result,
         messages: state.messages,
       });
     }
-  }, [state.result, state.messages, state.areaName, state.fileName]);
+  }, [state.result, state.fileName, state.messages]);
 
-  // Helper to update state
   const updateState = (updates) => setState(prev => ({ ...prev, ...updates }));
 
-  // ── FILE HANDLERS ─────────────────────────────────────────────────────
   const acceptFile = (f) => {
     if (!f) return;
     const ext = f.name.split('.').pop().toLowerCase();
@@ -139,53 +111,29 @@ const Analyzer = () => {
   const clearAnalysis = () => {
     updateState({
       result: null,
-      messages: [],
       error: null,
       file: null,
       fileName: null,
-      areaName: '',
+      messages: [],
+      question: '',
     });
     clearState();
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // ── ANALYZE ───────────────────────────────────────────────────────────
   const handleAnalyze = async () => {
     if (!state.file) return;
-    updateState({ analyzing: true, error: null, result: null, messages: [], showMonthly: false });
+    updateState({ analyzing: true, error: null, result: null, messages: [] });
 
     try {
-      const apiRes = await analyzeFile(state.file, state.areaName);
-      const data   = apiRes.data;
-
-      // Seed chat with AI's analysis text
-      const aiText = data.analysis || '';
-      let initialMessages = [];
-      
-      if (aiText && aiText.length > 50 && !aiText.toLowerCase().startsWith('error')) {
-        initialMessages = [{ role: 'ai', text: aiText }];
-      } else {
-        const s   = data.summary || {};
-        const res = s.residential || {};
-        const com = s.commercial  || {};
-        const msg =
-          `Analysis Complete\n\n` +
-          `Analyzed ${data.filename} — ${s.total_records || 0} total records.\n\n` +
-          `Residential: ${res.count || 0} houses  |  Avg ₹${(res.mean || 0).toFixed(2)}  |  Median ₹${(res.median || 0).toFixed(2)}\n` +
-          `Commercial: ${com.count || 0} properties  |  Avg ₹${(com.mean || 0).toFixed(2)}\n` +
-          `Anomalies: ${s.anomalies_count || 0} detected\n\n` +
-          `Ask me anything about the data!`;
-        initialMessages = [{ role: 'ai', text: msg }];
-      }
-
-      updateState({ result: data, messages: initialMessages, analyzing: false });
+      const apiRes = await analyzeFile(state.file, '');
+      updateState({ result: apiRes.data, analyzing: false });
     } catch (err) {
       const detail = err.response?.data?.details || err.response?.data?.error || err.message;
       updateState({ error: detail, analyzing: false });
     }
   };
 
-  // ── CHAT ──────────────────────────────────────────────────────────────
   const sendQuestion = async (q) => {
     const text = (q || state.question).trim();
     if (!text || !state.result || state.chatLoading) return;
@@ -197,14 +145,22 @@ const Analyzer = () => {
     });
 
     try {
-      const apiRes = await chatWithAI(text, state.result);
+      const chatContext = {
+        summary: state.result.summary,
+        spikes: state.result.spikes,
+        analysis: state.result.analysis,
+        raw_data: state.result.raw_data || []
+      };
+
+      const apiRes = await chatWithAI(text, chatContext);
+      
       updateState({
         messages: [...state.messages, { role: 'user', text }, { role: 'ai', text: apiRes.data.answer }],
         chatLoading: false,
       });
-    } catch {
+    } catch (err) {
       updateState({
-        messages: [...state.messages, { role: 'user', text }, { role: 'ai', text: 'Failed to get a response. Please try again.' }],
+        messages: [...state.messages, { role: 'user', text }, { role: 'ai', text: 'Failed to get response. Please try again.' }],
         chatLoading: false,
       });
     }
@@ -217,54 +173,41 @@ const Analyzer = () => {
     }
   };
 
-  // ── EXTRACT DATA FROM RESULT ──────────────────────────────────────────
-  const summary     = state.result?.summary || {};
-  const residential = summary.residential || {};
-  const commercial  = summary.commercial  || {};
-  const thresholds  = summary.thresholds  || {};
-  const monthlyData = summary.monthly_data || [];
-  const anomalies   = state.result?.anomalies || [];
+  const summary = state.result?.summary || {};
+  const spikes = state.result?.spikes || [];
+  const analysis = state.result?.analysis || '';
 
-  // ══════════════════════════════════════════════════════════════════════
-  //  RENDER
-  // ══════════════════════════════════════════════════════════════════════
   return (
-    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '2rem 1.5rem', fontFamily: "'Segoe UI', sans-serif", color: '#1e293b' }}>
+    <div style={{ maxWidth: 1200, margin: '0 auto', padding: '2rem 1.5rem', fontFamily: "'Segoe UI', sans-serif", color: '#1e293b' }}>
 
-      {/* ── HEADER ── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.75rem' }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: '1.65rem' }}>AI Bill Analyzer</h1>
-          <p style={{ margin: '3px 0 0', fontSize: '0.83rem', color: '#64748b' }}>
-            Upload an Excel file and let AI detect anomalies across residential &amp; commercial properties
-          </p>
+          <h1 style={{ margin: 0, fontSize: '1.7rem' }}>Bill Spike Analyzer</h1>
         </div>
         {state.result && (
           <button
             onClick={clearAnalysis}
-            style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', color: '#dc2626', fontSize: '0.82rem', cursor: 'pointer', fontWeight: 600 }}
+            style={{ padding: '9px 18px', borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', color: '#dc2626', fontSize: '0.82rem', cursor: 'pointer', fontWeight: 600 }}
           >
             New Analysis
           </button>
         )}
       </div>
 
-      {/* ── ERROR BANNER ── */}
       {state.error && (
-        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '11px 15px', color: '#dc2626', fontSize: '0.83rem', marginBottom: '0.75rem' }}>
+        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '12px 16px', color: '#dc2626', fontSize: '0.84rem', marginBottom: '0.9rem' }}>
           {state.error}
         </div>
       )}
 
-      {/* ── DROPZONE (only show if no result) ── */}
       {!state.result && (
         <>
           <div
             style={{
               border: `2px dashed ${state.dragging ? '#2563eb' : state.file ? '#16a34a' : '#cbd5e1'}`,
-              borderRadius: 12, padding: '2.3rem 1.5rem', textAlign: 'center', cursor: 'pointer',
+              borderRadius: 12, padding: '2.5rem 1.5rem', textAlign: 'center', cursor: 'pointer',
               background: state.dragging ? '#eff6ff' : state.file ? '#f0fdf4' : '#f8fafc',
-              transition: 'all 0.2s', marginBottom: '0.75rem',
+              transition: 'all 0.2s', marginBottom: '0.9rem',
             }}
             onClick={() => fileInputRef.current?.click()}
             onDragOver={(e) => { e.preventDefault(); updateState({ dragging: true }); }}
@@ -272,238 +215,135 @@ const Analyzer = () => {
             onDrop={onDrop}
           >
             <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={(e) => acceptFile(e.target.files[0])} />
-            <div style={{ fontSize: '2rem', marginBottom: 7, fontWeight: 600, color: state.file ? '#16a34a' : '#94a3b8' }}>
-              {state.file ? 'FILE SELECTED' : 'DROP FILE HERE'}
+            <div style={{ fontSize: '2.2rem', marginBottom: 8, fontWeight: 600, color: state.file ? '#16a34a' : '#94a3b8' }}>
+              {state.file ? 'FILE READY' : 'DROP FILE HERE'}
             </div>
-            <p style={{ margin: '0.25rem 0', fontSize: '0.93rem', color: '#475569' }}>
-              {state.file ? 'File selected — click to change' : 'Drag & drop your Excel file here or click to browse'}
+            <p style={{ margin: '0.3rem 0', fontSize: '0.95rem', color: '#475569' }}>
+              {state.file ? 'File selected — click to change' : 'Drag & drop your Excel file or click to browse'}
             </p>
-            <p style={{ margin: 0, fontSize: '0.76rem', color: '#94a3b8' }}>.xlsx, .xls, or .csv  |  12 months of bill data</p>
+            <p style={{ margin: 0, fontSize: '0.77rem', color: '#94a3b8' }}>.xlsx, .xls, or .csv</p>
             {state.file && (
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: '#e0f2fe', color: '#0369a1', padding: '6px 12px', borderRadius: 20, fontSize: '0.81rem', marginTop: 9 }}>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 9, background: '#e0f2fe', color: '#0369a1', padding: '7px 14px', borderRadius: 20, fontSize: '0.82rem', marginTop: 10 }}>
                 {state.file.name}
-                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#0369a1', fontSize: 16, padding: 0, lineHeight: 1 }} onClick={removeFile}>✕</button>
+                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#0369a1', fontSize: 17, padding: 0, lineHeight: 1 }} onClick={removeFile}>✕</button>
               </div>
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: 10, marginBottom: '1rem' }}>
-            <input
-              style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.88rem', outline: 'none' }}
-              placeholder="Area / Street name (optional)"
-              value={state.areaName}
-              onChange={(e) => updateState({ areaName: e.target.value })}
-            />
-            <button
-              disabled={!state.file || state.analyzing}
-              onClick={handleAnalyze}
-              style={{
-                padding: '10px 24px', borderRadius: 8, border: 'none',
-                background: (!state.file || state.analyzing) ? '#94a3b8' : '#2563eb',
-                color: '#fff', fontWeight: 600, fontSize: '0.88rem',
-                cursor: (!state.file || state.analyzing) ? 'not-allowed' : 'pointer',
-                display: 'inline-flex', alignItems: 'center', gap: 8,
-              }}
-            >
-              {state.analyzing && <span style={{ width: 18, height: 18, border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin 0.6s linear infinite' }} />}
-              {state.analyzing ? 'Analyzing…' : 'Analyze with AI'}
-            </button>
-          </div>
+          <button
+            disabled={!state.file || state.analyzing}
+            onClick={handleAnalyze}
+            style={{
+              padding: '11px 26px', borderRadius: 8, border: 'none',
+              background: (!state.file || state.analyzing) ? '#94a3b8' : '#2563eb',
+              color: '#fff', fontWeight: 600, fontSize: '0.9rem',
+              cursor: (!state.file || state.analyzing) ? 'not-allowed' : 'pointer',
+              display: 'inline-flex', alignItems: 'center', gap: 9, width: '100%',
+              justifyContent: 'center',
+            }}
+          >
+            {state.analyzing && <span style={{ width: 19, height: 19, border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin 0.6s linear infinite' }} />}
+            {state.analyzing ? 'Analyzing Each Consumer...' : 'Start Analysis'}
+          </button>
+
+          {state.analyzing && (
+            <div style={{ marginTop: '1.5rem', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '1.2rem', fontSize: '0.84rem', color: '#1e40af' }}>
+              <div style={{ display: 'flex', alignItems: 'normal', gap: 10, marginBottom: '0.5rem' }}>
+                <span style={{ animation: 'pulse 1.5s ease-in-out infinite', fontSize: '1.3rem' }}></span>
+                <p style={{ margin: 0, fontWeight: 600 }}>Analyzing...</p>
+              </div>
+              <p style={{ margin: 0, fontSize: '0.79rem', color: '#1e40af', opacity: 0.9 }}>
+                This may take a moment.
+              </p>
+            </div>
+          )}
         </>
       )}
 
-      {/* ══════════════════════════════════════════════════════════════════
-          RESULTS SECTION
-          ══════════════════════════════════════════════════════════════════ */}
       {state.result && (
         <div style={{ animation: 'fadeIn 0.4s ease' }}>
 
-          {/* File info banner */}
-          <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '10px 14px', marginBottom: '0.9rem', fontSize: '0.82rem', color: '#0369a1' }}>
-            <strong>{state.result.filename}</strong> {state.areaName && `• ${state.areaName}`} • Analyzed on {new Date(state.result.timestamp || Date.now()).toLocaleString()}
+          <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '11px 16px', marginBottom: '1rem', fontSize: '0.83rem', color: '#0369a1' }}>
+            <strong>{state.result.filename}</strong> • Analysis completed at {new Date().toLocaleString()}
           </div>
 
-          {/* Summary cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.7rem', marginBottom: '0.9rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.8rem', marginBottom: '1rem' }}>
             {[
-              { label: 'Total Records',   value: summary.total_records ?? 0,                  color: '#6366f1' },
-              { label: 'Anomalies Found', value: summary.anomalies_count ?? 0,                color: '#dc2626' },
-              { label: 'Residential Avg', value: `₹${(residential.mean || 0).toFixed(2)}`,    color: '#2563eb' },
-              { label: 'Commercial Avg',  value: `₹${(commercial.mean || 0).toFixed(2)}`,     color: '#16a34a' },
+              { label: 'Total Consumers',     value: summary.total_consumers ?? 0,         color: '#6366f1' },
+              { label: 'Spikes Detected',     value: summary.spike_count ?? 0,             color: '#dc2626' },
+              { label: 'Consumers w/ Spikes', value: summary.consumers_with_spikes ?? 0,   color: '#ea580c' },
+              { label: 'Residential',         value: summary.residential_count ?? 0,       color: '#2563eb' },
             ].map((c, i) => (
-              <div key={i} style={{ background: '#fff', borderRadius: 10, padding: '13px 15px', borderLeft: `4px solid ${c.color}`, boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e2e8f0' }}>
-                <p style={{ margin: 0, fontSize: '0.68rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{c.label}</p>
-                <p style={{ margin: '4px 0 0', fontSize: '1.28rem', fontWeight: 700 }}>{c.value}</p>
+              <div key={i} style={{ background: '#fff', borderRadius: 10, padding: '14px 16px', borderLeft: `4px solid ${c.color}`, boxShadow: '0 1px 3px rgba(0,0,0,0.09)', border: '1px solid #e2e8f0' }}>
+                <p style={{ margin: 0, fontSize: '0.69rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{c.label}</p>
+                <p style={{ margin: '5px 0 0', fontSize: '1.32rem', fontWeight: 700 }}>{c.value}</p>
               </div>
             ))}
           </div>
 
-          {/* Residential & Commercial stat boxes */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.7rem', marginBottom: '0.9rem' }}>
-            {/* Residential */}
-            <div style={{ background: '#fff', borderRadius: 10, padding: '14px 16px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.07)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 9 }}>
-                <p style={{ margin: 0, fontWeight: 600, fontSize: '0.88rem', color: '#1e40af' }}>Residential</p>
-                <span style={{ fontSize: '0.7rem', background: '#dbeafe', color: '#1e40af', padding: '3px 9px', borderRadius: 10, fontWeight: 600 }}>
-                  {residential.count || 0} records
-                </span>
+          {analysis && (
+            <div style={{ background: '#fff', borderRadius: 10, padding: '1.3rem', border: '1px solid #e2e8f0', marginBottom: '1rem', boxShadow: '0 1px 3px rgba(0,0,0,0.07)' }}>
+              <h2 style={{ margin: '0 0 0.8rem', fontSize: '1.05rem', fontWeight: 600, color: '#1e293b' }}>AI Insights & Analysis</h2>
+              <div style={{ fontSize: '0.86rem', lineHeight: 1.7, color: '#475569', whiteSpace: 'pre-wrap' }}>
+                {analysis}
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '7px 12px', fontSize: '0.78rem' }}>
-                {[
-                  ['Mean',   residential.mean],
-                  ['Median', residential.median],
-                  ['Min',    residential.min],
-                  ['Max',    residential.max],
-                ].map(([label, val]) => (
-                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748b' }}>{label}</span>
-                    <span style={{ fontWeight: 600, color: '#1e293b' }}>₹{(val || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={{ marginTop: 9, fontSize: '0.72rem', color: '#64748b', borderTop: '1px solid #e2e8f0', paddingTop: 7 }}>
-                Normal range: ₹{(thresholds.residential_min || 500).toLocaleString()} – ₹{(thresholds.residential_max || 5000).toLocaleString()}
-              </div>
-            </div>
-
-            {/* Commercial */}
-            <div style={{ background: '#fff', borderRadius: 10, padding: '14px 16px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.07)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 9 }}>
-                <p style={{ margin: 0, fontWeight: 600, fontSize: '0.88rem', color: '#15803d' }}>Commercial</p>
-                <span style={{ fontSize: '0.7rem', background: '#dcfce7', color: '#15803d', padding: '3px 9px', borderRadius: 10, fontWeight: 600 }}>
-                  {commercial.count || 0} records
-                </span>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '7px 12px', fontSize: '0.78rem' }}>
-                {[
-                  ['Mean',   commercial.mean],
-                  ['Median', commercial.median],
-                  ['Min',    commercial.min],
-                  ['Max',    commercial.max],
-                ].map(([label, val]) => (
-                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748b' }}>{label}</span>
-                    <span style={{ fontWeight: 600, color: '#1e293b' }}>₹{(val || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={{ marginTop: 9, fontSize: '0.72rem', color: '#64748b', borderTop: '1px solid #e2e8f0', paddingTop: 7 }}>
-                Commercial properties excluded from anomaly detection
-              </div>
-            </div>
-          </div>
-
-          {/* Monthly data toggle */}
-          {monthlyData.length > 0 && (
-            <div style={{ marginBottom: '0.9rem' }}>
-              <button
-                onClick={() => updateState({ showMonthly: !state.showMonthly })}
-                style={{ background: 'none', border: '1px solid #cbd5e1', borderRadius: 8, padding: '8px 15px', cursor: 'pointer', fontSize: '0.8rem', color: '#475569', fontWeight: 600, transition: 'background 0.15s' }}
-                onMouseEnter={(e) => e.target.style.background = '#f1f5f9'}
-                onMouseLeave={(e) => e.target.style.background = 'none'}
-              >
-                {state.showMonthly ? '▼ Hide' : '▶ Show'} Monthly Breakdown ({monthlyData.length} months)
-              </button>
-
-              {state.showMonthly && (
-                <div style={{ overflowX: 'auto', marginTop: 9 }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
-                    <thead>
-                      <tr>
-                        {['Month','Bills','Total ₹','Avg ₹','Max ₹','Units'].map(h => (
-                          <th key={h} style={{ padding: '9px 11px', background: '#f1f5f9', color: '#475569', textAlign: 'left', borderBottom: '2px solid #e2e8f0', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                            {h}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {monthlyData.map((m, i) => (
-                        <tr key={i} className="analyzer-row">
-                          <td style={{ padding: '8px 11px', borderBottom: '1px solid #eef2f7', fontWeight: 600 }}>
-                            {cleanMonthName(m.month)}
-                          </td>
-                          <td style={{ padding: '8px 11px', borderBottom: '1px solid #eef2f7' }}>
-                            {(m.count || 0).toLocaleString()}
-                          </td>
-                          <td style={{ padding: '8px 11px', borderBottom: '1px solid #eef2f7' }}>
-                            ₹{(m.total_amount || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                          </td>
-                          <td style={{ padding: '8px 11px', borderBottom: '1px solid #eef2f7' }}>
-                            ₹{(m.average_amount || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                          </td>
-                          <td style={{ padding: '8px 11px', borderBottom: '1px solid #eef2f7', color: '#dc2626', fontWeight: 600 }}>
-                            ₹{(m.max_amount || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                          </td>
-                          <td style={{ padding: '8px 11px', borderBottom: '1px solid #eef2f7' }}>
-                            {(m.total_units || 0).toLocaleString()}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
             </div>
           )}
 
-          {/* Anomaly table */}
-          {anomalies.length > 0 && (
-            <div style={{ overflowX: 'auto', marginBottom: '1.25rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 7 }}>
-                <p style={{ margin: 0, fontSize: '0.92rem', fontWeight: 600, color: '#1e293b' }}>
-                  Detected Anomalies
-                </p>
-                <span style={{ fontSize: '0.72rem', background: '#fef2f2', color: '#dc2626', padding: '4px 11px', borderRadius: 12, fontWeight: 700 }}>
-                  {anomalies.length} total
+          {spikes.length > 0 && (
+            <div style={{ overflowX: 'auto', marginBottom: '1.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <h2 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600, color: '#1e293b' }}>
+                  Detected Spikes
+                </h2>
+                <span style={{ fontSize: '0.73rem', background: '#fef2f2', color: '#dc2626', padding: '5px 12px', borderRadius: 12, fontWeight: 700 }}>
+                  {spikes.length} spikes found
                 </span>
               </div>
 
-              <div style={{ maxHeight: 500, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 8 }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
-                  <thead style={{ position: 'sticky', top: 0, background: '#f1f5f9', zIndex: 1 }}>
+              <div style={{ maxHeight: 450, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 10 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.81rem' }}>
+                  <thead style={{ position: 'sticky', top: 0, background: '#fef9c3', zIndex: 1 }}>
                     <tr>
-                      {['#','House ID','Address','Month','Bill ₹','Units','Severity','Reason'].map(h => (
-                        <th key={h} style={{ padding: '10px 12px', color: '#475569', textAlign: 'left', borderBottom: '2px solid #cbd5e1', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                      {['#','Consumer ID','Type','Spike Month','Current Bill','Baseline','Increase %','Reason'].map(h => (
+                        <th key={h} style={{ padding: '11px 13px', color: '#713f12', textAlign: 'left', borderBottom: '2px solid #fde047', fontWeight: 600, whiteSpace: 'nowrap' }}>
                           {h}
                         </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {anomalies.map((a, i) => (
-                      <tr key={i} className="analyzer-row">
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7', color: '#94a3b8', fontSize: '0.72rem' }}>
-                          {i + 1}
-                        </td>
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7', fontWeight: 600 }}>
-                          {a.house_id}
-                        </td>
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7', color: '#64748b', maxWidth: 150, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {a.address || '—'}
-                        </td>
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7' }}>
-                          {a.month}
-                        </td>
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7', fontWeight: 700, color: a.severity === 'high' ? '#dc2626' : '#ca8a04' }}>
-                          ₹{(a.bill_amount || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                        </td>
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7' }}>
-                          {(a.units_consumed || 0).toLocaleString()}
-                        </td>
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7' }}>
+                    {spikes.map((spike, i) => (
+                      <tr key={i} className="spike-row">
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7', color: '#94a3b8', fontSize: '0.73rem' }}>{i + 1}</td>
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7', fontWeight: 600 }}>{spike.consumer_id}</td>
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7' }}>
                           <span style={{
-                            display: 'inline-block', padding: '3px 10px', borderRadius: 12, fontSize: '0.68rem', fontWeight: 700,
-                            background: a.severity === 'high' ? '#fef2f2' : '#fefce8',
-                            color:      a.severity === 'high' ? '#dc2626' : '#ca8a04',
+                            display: 'inline-block', padding: '3px 10px', borderRadius: 12, fontSize: '0.69rem', fontWeight: 700,
+                            background: spike.consumer_type === 'Commercial' ? '#dcfce7' : '#dbeafe',
+                            color: spike.consumer_type === 'Commercial' ? '#15803d' : '#1e40af',
                             textTransform: 'uppercase',
                           }}>
-                            {a.severity}
+                            {spike.consumer_type}
                           </span>
                         </td>
-                        <td style={{ padding: '9px 12px', borderBottom: '1px solid #eef2f7', color: '#64748b', minWidth: 220 }}>
-                          {a.reason}
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7', fontWeight: 600 }}>{spike.month}</td>
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7', fontWeight: 700, color: '#dc2626' }}>
+                          ₹{spike.bill_amount.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                         </td>
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7', color: '#64748b' }}>
+                          ₹{spike.previous_bill.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                        </td>
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7' }}>
+                          <span style={{
+                            display: 'inline-block', padding: '3px 10px', borderRadius: 12, fontSize: '0.73rem', fontWeight: 700,
+                            background: spike.increase_percentage > 100 ? '#fee2e2' : '#fef3c7',
+                            color: spike.increase_percentage > 100 ? '#991b1b' : '#854d0e',
+                          }}>
+                            +{spike.increase_percentage.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td style={{ padding: '10px 13px', borderBottom: '1px solid #eef2f7', color: '#64748b', minWidth: 250 }}>{spike.reason}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -512,26 +352,39 @@ const Analyzer = () => {
             </div>
           )}
 
-          {/* Chat section */}
-          <div style={{ marginTop: '1.3rem' }}>
-            <p style={{ margin: '0 0 0.6rem', fontSize: '0.96rem', fontWeight: 600 }}>Ask AI about the results</p>
+          {spikes.length === 0 && (
+            <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '2rem', textAlign: 'center', color: '#15803d', marginBottom: '1.5rem' }}>
+              <p style={{ fontSize: '1.1rem', fontWeight: 600, margin: 0 }}>No Spikes Detected</p>
+              <p style={{ fontSize: '0.85rem', margin: '0.5rem 0 0', color: '#166534' }}>
+                All consumers show stable, predictable usage patterns.
+              </p>
+            </div>
+          )}
 
-            <div style={{ background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0', height: 380, overflowY: 'auto', padding: '1rem', display: 'flex', flexDirection: 'column', gap: 11 }}>
+          {/* CHAT SECTION - AFTER SPIKE TABLE */}
+          <div style={{ marginTop: '1.5rem' }}>
+            <h2 style={{ margin: '0 0 0.9rem', fontSize: '1.05rem', fontWeight: 600, color: '#1e293b' }}>
+              💬 Ask Questions About the Analysis
+            </h2>
+
+            <div style={{ background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0', height: 400, overflowY: 'auto', padding: '1rem', display: 'flex', flexDirection: 'column', gap: 11, marginBottom: '0.8rem' }}>
               {state.messages.length === 0 && (
                 <div style={{ textAlign: 'center', color: '#94a3b8', padding: '50px 0', fontSize: '0.83rem' }}>
-                  Analysis complete — ask a question below
+                  <p style={{ margin: 0, fontSize: '1.1rem', marginBottom: '0.5rem' }}>💡 Ask me anything!</p>
+                  <p style={{ margin: 0 }}>Try the suggested questions below or type your own</p>
                 </div>
               )}
               {state.messages.map((m, i) => (
                 <div key={i} style={{
-                  maxWidth: '88%', padding: '11px 15px',
+                  maxWidth: '85%', padding: '11px 15px',
                   borderRadius: m.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
                   background: m.role === 'user' ? '#2563eb' : '#fff',
-                  color:      m.role === 'user' ? '#fff'     : '#1e293b',
+                  color: m.role === 'user' ? '#fff' : '#1e293b',
                   fontSize: '0.84rem', lineHeight: 1.6,
                   alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
                   boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
                   whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
                 }}>
                   {m.text}
                 </div>
@@ -539,31 +392,51 @@ const Analyzer = () => {
               {state.chatLoading && (
                 <div style={{ alignSelf: 'flex-start', display: 'flex', alignItems: 'center', gap: 9 }}>
                   <span style={{ width: 16, height: 16, border: '2px solid #dbeafe', borderTop: '2px solid #2563eb', borderRadius: '50%', animation: 'spin 0.6s linear infinite', display: 'inline-block' }} />
-                  <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>AI is thinking…</span>
+                  <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>AI is thinking...</span>
                 </div>
               )}
               <div ref={chatBottomRef} />
             </div>
 
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: '0.6rem' }}>
-              {SUGGESTIONS.map((s, i) => (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: '0.8rem' }}>
+              {SUGGESTED_QUESTIONS.map((sq, i) => (
                 <button
                   key={i}
                   className="suggest-btn"
                   disabled={state.chatLoading}
-                  onClick={() => sendQuestion(s)}
-                  style={{ padding: '6px 12px', borderRadius: 16, border: '1px solid #cbd5e1', background: '#fff', color: '#475569', fontSize: '0.73rem', cursor: state.chatLoading ? 'not-allowed' : 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                  onClick={() => sendQuestion(sq)}
+                  style={{ 
+                    padding: '7px 13px', 
+                    borderRadius: 16, 
+                    border: '1px solid #cbd5e1', 
+                    background: '#fff', 
+                    color: '#475569', 
+                    fontSize: '0.75rem', 
+                    cursor: state.chatLoading ? 'not-allowed' : 'pointer', 
+                    fontWeight: 500,
+                    transition: 'all 0.15s',
+                  }}
                 >
-                  {s}
+                  {sq}
                 </button>
               ))}
             </div>
 
-            <div style={{ display: 'flex', gap: 9, marginTop: '0.6rem' }}>
+            <div style={{ display: 'flex', gap: 9 }}>
               <textarea
-                style={{ flex: 1, padding: '11px 14px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.84rem', outline: 'none', resize: 'none', fontFamily: 'inherit' }}
+                style={{ 
+                  flex: 1, 
+                  padding: '12px 14px', 
+                  borderRadius: 8, 
+                  border: '1px solid #cbd5e1', 
+                  fontSize: '0.84rem', 
+                  outline: 'none', 
+                  resize: 'none', 
+                  fontFamily: 'inherit',
+                  minHeight: '50px',
+                }}
                 rows={2}
-                placeholder="Ask anything about this analysis… (Enter to send)"
+                placeholder="Ask anything about the analysis... (Press Enter to send)"
                 value={state.question}
                 onChange={(e) => updateState({ question: e.target.value })}
                 onKeyDown={onKeyDown}
@@ -573,10 +446,15 @@ const Analyzer = () => {
                 disabled={!state.question.trim() || state.chatLoading}
                 onClick={() => sendQuestion()}
                 style={{
-                  padding: '11px 22px', borderRadius: 8, border: 'none',
+                  padding: '12px 24px', 
+                  borderRadius: 8, 
+                  border: 'none',
                   background: (!state.question.trim() || state.chatLoading) ? '#94a3b8' : '#2563eb',
-                  color: '#fff', fontWeight: 600, fontSize: '0.86rem',
+                  color: '#fff', 
+                  fontWeight: 600, 
+                  fontSize: '0.86rem',
                   cursor: (!state.question.trim() || state.chatLoading) ? 'not-allowed' : 'pointer',
+                  alignSelf: 'stretch',
                 }}
               >
                 Send
@@ -586,10 +464,9 @@ const Analyzer = () => {
         </div>
       )}
 
-      {/* Empty state */}
       {!state.result && !state.analyzing && (
-        <div style={{ textAlign: 'center', color: '#94a3b8', padding: '60px 0', fontSize: '0.86rem' }}>
-          Upload a file and click <strong>Analyze with AI</strong> to get started
+        <div style={{ textAlign: 'center', color: '#94a3b8', padding: '70px 0', fontSize: '0.88rem' }}>
+          Upload a file to start spike detection
         </div>
       )}
     </div>
